@@ -20,7 +20,12 @@ and it deliberately plants the traps listed in the exercise doc:
     "KIAH01"); records are ordered in EBCDIC collating sequence
 
 Usage:
-  python3 gen_obs.py OUTFILE [--seed N]
+  python3 gen_obs.py OUTFILE [--seed N] [--late-records]
+
+--late-records moves KIAH01 2028-02-27 hours 12-23 to the end of the file, as if
+they arrived late and were appended. The legacy control break then reports that
+station-day twice (two partial groups); Beam groups by key and reports it once.
+Use it to demonstrate the difference; the reference outputs are made without it.
 """
 import argparse
 import random
@@ -153,9 +158,19 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("outfile")
     ap.add_argument("--seed", type=int, default=20261012)
+    ap.add_argument("--late-records", action="store_true",
+                    help="append KIAH01 20280227 h12-23 at the end (split-key demo)")
     args = ap.parse_args()
 
     records, notes = build(args.seed)
+    if args.late_records:
+        def is_late(r):
+            return (r[0:6].decode(CODEPAGE) == "KIAH01"
+                    and r[6:14].decode(CODEPAGE) == "20280227"
+                    and int(r[14:16].decode(CODEPAGE)) >= 12)
+        late = [r for r in records if is_late(r)]
+        records = [r for r in records if not is_late(r)] + late
+        notes.append(f"--late-records: moved {len(late)} KIAH01 20280227 records to the end")
     with open(args.outfile, "wb") as f:
         for r in records:
             f.write(r)

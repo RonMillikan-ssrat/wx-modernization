@@ -111,9 +111,70 @@ Check on the first GCP run:
   mounts. If Batch reports a duplicate mount, remove that list.
 - On GnuCOBOL 4.0-early-dev, if `-std=default` is rejected, drop the flag.
 
-## Next: Phase 2
+Phase 1 has been run end to end on GCP: Cloud Batch job `SUCCEEDED` and
+`deploy.sh fetch` reported `PARITY OK`.
 
-The decoder functions in `scripts/wxsumm_ref.py` (`decode_comp3`,
-`decode_comp_be`, `decode_display`) and `validate` become a Beam `DoFn`. The
-control break becomes a `GroupByKey` on station and date. The parity check
-moves into BigQuery, comparing the pipeline table with this phase's output.
+---
+
+# Phase 2: refactor to Apache Beam (Java)
+
+The same logic as WXSUMM, in Java on Apache Beam 2.76.0, in `pipeline/`.
+
+```bash
+pipeline/run_local.sh      # unit tests, plain-Java parity, Beam DirectRunner runs
+```
+
+```
+pipeline/
+  src/main/java/wx/core/       business logic, no Beam dependency
+    CopybookCodec.java           COMP-3, big-endian COMP, CP037 display decoders
+    WxobsLayout.java             field offsets, the Java twin of WXOBS.cpy
+    Validator.java               3100-VALIDATE: same checks, same order, same codes
+    DayAccumulator.java          4000-ACCUMULATE, order- and partition-independent
+    DaySummary.java              5000-WRITE-SUMMARY: BigDecimal, COBOL ROUNDED, edited pictures
+    LegacyOrder.java             EBCDIC collating order
+    SplitKeyDetector.java        tracks legacy control-break runs
+    LegacyReport.java            single-process runner that writes the legacy report format
+  src/main/java/wx/pipeline/
+    WxSummaryPipeline.java       Beam wiring only
+  src/test/java/wx/core/       34 JUnit 5 tests, including a golden-file test
+```
+
+| Check | Compares | Method |
+| --- | --- | --- |
+| Golden-file unit test | `LegacyReport` vs WXSUMM output | Byte for byte |
+| `LegacyReport` run | Plain-Java core vs `reference/sample/` | `parity_check.py`, byte for byte |
+| Beam DirectRunner | Pipeline output vs `reference/sample/` | `keyed_parity.py`, joined on station+date (Beam output has no order) |
+
+## Behaviour differences from the legacy program
+
+See the doc *Legacy vs Beam: Two Behavior Differences* for the full explanation.
+
+- **Grouping.** The COBOL control break groups consecutive records; Beam groups
+  every record with a key. On a file where a station-day appears in two separate
+  runs, COBOL writes two partial lines and Beam writes one complete line. The
+  pipeline counts legacy runs while it still reads each file in order and writes
+  any split key to `split_keys.txt`. Demo: `gen_obs.py --late-records`.
+- **Order.** Beam and BigQuery output is unordered and sorts by UTF-8 rules.
+  `LegacyOrder` reproduces EBCDIC order when the legacy order is required.
+- **Extra dead-letter codes.** `R06` marks records that cannot be decoded (bad
+  packed nibble, or trailing bytes when the file size is not a multiple of 40).
+  WXSUMM had no such check.
+
+## What has and hasn't been run (Phase 2)
+
+| Item | Status |
+| --- | --- |
+| `wx.core` compiled (Java 21, `--release 17`) | Run |
+| 34 unit tests | Pass. Run with a minimal JUnit stand-in, as Maven Central was unreachable where this was built; your `mvn test` is the first real JUnit run |
+| Mutation check: banker's rounding, little-endian COMP, F sign rejected | Each one fails the suite |
+| `LegacyReport` vs WXSUMM reference | Byte-identical |
+| Late-records demo: COBOL 21 groups vs Java 20 groups and 1 warning | Run |
+| `keyed_parity.py` on shuffled and tampered output | Run |
+| `WxSummaryPipeline` (Beam) | **Not compiled yet** (no Maven access where it was written) |
+
+## Next
+
+Step 5: BigQuery `summary` (partitioned by date) and `errors` tables, plus a
+Pub/Sub dead-letter topic. Step 6: run on Dataflow. Step 7: parity as a
+BigQuery SQL join against the Phase 1 output.
