@@ -1,0 +1,54 @@
+{
+  "taskGroups": [
+    {
+      "taskCount": 1,
+      "taskSpec": {
+        "runnables": [
+          {
+            "container": {
+              "imageUri": "${IMAGE_URI}",
+              "volumes": [
+                "/mnt/disks/landing:/mnt/disks/landing",
+                "/mnt/disks/output:/mnt/disks/output",
+                "/mnt/disks/reference:/mnt/disks/reference"
+              ]
+            }
+          }
+        ],
+        "environment": {
+          "variables": {
+            "RUN_DATE": "${RUN_DATE}"
+          }
+        },
+        "volumes": [
+          {
+            "gcs": { "remotePath": "${LANDING_BUCKET}" },
+            "mountPath": "/mnt/disks/landing",
+            "mountOptions": ["--implicit-dirs"]
+          },
+          {
+            "gcs": { "remotePath": "${OUTPUT_BUCKET}" },
+            "mountPath": "/mnt/disks/output",
+            "mountOptions": ["--implicit-dirs"]
+          },
+          {
+            "gcs": { "remotePath": "${REFERENCE_BUCKET}" },
+            "mountPath": "/mnt/disks/reference",
+            "mountOptions": ["--implicit-dirs"]
+          }
+        ],
+        "computeResource": { "cpuMilli": 1000, "memoryMib": 1024 },
+        "maxRetryCount": 0,
+        "maxRunDuration": "1800s"
+      }
+    }
+  ],
+  "allocationPolicy": {
+    "instances": [
+      { "policy": { "machineType": "e2-standard-2", "provisioningModel": "STANDARD" } }
+    ],
+    "serviceAccount": { "email": "${RUNNER_SA}" }
+  },
+  "labels": { "app": "wxsumm", "phase": "lift-and-shift" },
+  "logsPolicy": { "destination": "CLOUD_LOGGING" }
+}

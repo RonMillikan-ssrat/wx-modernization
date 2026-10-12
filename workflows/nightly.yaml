@@ -1,0 +1,113 @@
+# Nightly WXSUMM run: the GCP stand-in for the scheduler + JCL job stream.
+#
+# Cloud Scheduler -> this workflow -> Cloud Batch job (WXSUMM + parity check)
+#
+# The Batch connector creates the job and waits for it to finish, so no
+# polling loop is needed. Any failure (WXSUMM RC > 4, parity mismatch,
+# missing reference or input) surfaces as a failed workflow execution,
+# which is what the alerting policy watches.
+#
+# Deploy-time environment variables (set by scripts/deploy.sh):
+#   REGION, IMAGE_URI, RUNNER_SA, LANDING_BUCKET, OUTPUT_BUCKET,
+#   REFERENCE_BUCKET
+# Runtime argument (optional): {"runDate": "sample"}
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - project: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: ${sys.get_env("REGION")}
+          - runDate: "sample"
+          - jobId: ${"wxsumm-" + string(int(sys.now()))}
+
+    - readRunDate:
+        switch:
+          - condition: ${args != null and "runDate" in args}
+            steps:
+              - setRunDate:
+                  assign:
+                    - runDate: ${args.runDate}
+
+    - logStart:
+        call: sys.log
+        args:
+          severity: INFO
+          text: ${"WXSUMM starting job " + jobId + " for runDate=" + runDate}
+
+    - runBatchJob:
+        try:
+          call: googleapis.batch.v1.projects.locations.jobs.create
+          args:
+            parent: ${"projects/" + project + "/locations/" + region}
+            jobId: ${jobId}
+            connector_params:
+              timeout: 3600
+            body:
+              taskGroups:
+                - taskCount: 1
+                  taskSpec:
+                    runnables:
+                      - container:
+                          imageUri: ${sys.get_env("IMAGE_URI")}
+                          volumes:
+                            - "/mnt/disks/landing:/mnt/disks/landing"
+                            - "/mnt/disks/output:/mnt/disks/output"
+                            - "/mnt/disks/reference:/mnt/disks/reference"
+                    environment:
+                      variables:
+                        RUN_DATE: ${runDate}
+                    volumes:
+                      - gcs:
+                          remotePath: ${sys.get_env("LANDING_BUCKET")}
+                        mountPath: "/mnt/disks/landing"
+                        mountOptions: ["--implicit-dirs"]
+                      - gcs:
+                          remotePath: ${sys.get_env("OUTPUT_BUCKET")}
+                        mountPath: "/mnt/disks/output"
+                        mountOptions: ["--implicit-dirs"]
+                      - gcs:
+                          remotePath: ${sys.get_env("REFERENCE_BUCKET")}
+                        mountPath: "/mnt/disks/reference"
+                        mountOptions: ["--implicit-dirs"]
+                    computeResource:
+                      cpuMilli: 1000
+                      memoryMib: 1024
+                    maxRetryCount: 0
+                    maxRunDuration: "1800s"
+              allocationPolicy:
+                instances:
+                  - policy:
+                      machineType: "e2-standard-2"
+                      provisioningModel: "STANDARD"
+                serviceAccount:
+                  email: ${sys.get_env("RUNNER_SA")}
+              labels:
+                app: "wxsumm"
+                phase: "lift-and-shift"
+              logsPolicy:
+                destination: "CLOUD_LOGGING"
+          result: job
+        except:
+          as: e
+          steps:
+            - logFailure:
+                call: sys.log
+                args:
+                  severity: ERROR
+                  text: '${"WXSUMM job " + jobId + " failed: " + json.encode_to_string(e)}'
+            - reraise:
+                raise: ${e}
+
+    - checkState:
+        switch:
+          - condition: ${job.status.state != "SUCCEEDED"}
+            raise: ${"WXSUMM job " + jobId + " ended in state " + job.status.state}
+
+    - done:
+        return:
+          jobId: ${jobId}
+          runDate: ${runDate}
+          state: ${job.status.state}
+          outputs: '${"gs://" + sys.get_env("OUTPUT_BUCKET") + "/" + runDate + "/"}'
