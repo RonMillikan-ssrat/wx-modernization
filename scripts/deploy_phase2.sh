@@ -165,9 +165,14 @@ step_run_dataflow() {
         --maxNumWorkers=1"
 }
 
+# Substitutes ${DATASET} and ${RUN_ID}, and drops whole-line "--" comments: bq treats a query
+# argument that starts with "--" as one of its own flags.
 render_sql() {
-    DATASET="$DATASET" RUN_ID="$RUN_ID" python3 -c \
-        'import os,sys; sys.stdout.write(os.path.expandvars(open(sys.argv[1]).read()))' "$1"
+    DATASET="$DATASET" RUN_ID="$RUN_ID" python3 -c '
+import os, sys
+text = os.path.expandvars(open(sys.argv[1]).read())
+sys.stdout.write("\n".join(l for l in text.splitlines() if not l.lstrip().startswith("--")))
+' "$1"
 }
 
 step_parity() {
