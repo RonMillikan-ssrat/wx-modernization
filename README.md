@@ -161,20 +161,56 @@ See the doc *Legacy vs Beam: Two Behavior Differences* for the full explanation.
   packed nibble, or trailing bytes when the file size is not a multiple of 40).
   WXSUMM had no such check.
 
-## What has and hasn't been run (Phase 2)
+## What has and hasn't been run (Phase 2, steps 1-4)
 
 | Item | Status |
 | --- | --- |
-| `wx.core` compiled (Java 21, `--release 17`) | Run |
-| 34 unit tests | Pass. Run with a minimal JUnit stand-in, as Maven Central was unreachable where this was built; your `mvn test` is the first real JUnit run |
+| `pipeline/run_local.sh` on Ubuntu, Java 21, Maven 3.9.12 | `PHASE 2 LOCAL OK` |
+| Unit tests under JUnit 5 | Pass |
 | Mutation check: banker's rounding, little-endian COMP, F sign rejected | Each one fails the suite |
 | `LegacyReport` vs WXSUMM reference | Byte-identical |
-| Late-records demo: COBOL 21 groups vs Java 20 groups and 1 warning | Run |
-| `keyed_parity.py` on shuffled and tampered output | Run |
-| `WxSummaryPipeline` (Beam) | **Not compiled yet** (no Maven access where it was written) |
+| Beam DirectRunner vs WXSUMM reference | Keyed parity on 20 rows and 5 rejects |
+| Late-records demo: COBOL 21 groups vs Beam 20 groups and 1 split-key warning | Run |
 
-## Next
+---
 
-Step 5: BigQuery `summary` (partitioned by date) and `errors` tables, plus a
-Pub/Sub dead-letter topic. Step 6: run on Dataflow. Step 7: parity as a
-BigQuery SQL join against the Phase 1 output.
+# Phase 2 on GCP: BigQuery, Pub/Sub, Dataflow, Flex Template
+
+```
+                      ┌─▶ BigQuery wx.summary   (partitioned by obs_date, clustered by station)
+gs://…-landing ─▶ Dataflow ─┼─▶ BigQuery wx.errors    (rejects with legacy reason codes)
+  obs.ebc        WxSummary  ├─▶ Pub/Sub wx-dead-letter (one JSON message per reject)
+                 Pipeline   └─▶ gs://…-output/beam/<run_id>/ (summary, errors, split_keys .txt)
+
+BigQuery: wx.reference_summary_raw + wx.reference_errors_raw (WXSUMM report, one line per row)
+          parity.sql parses them by column position and joins on station + obs_date
+```
+
+```bash
+export PROJECT_ID=wx-modernization-0 REGION=us-central1
+gcloud auth application-default login       # the pipeline launcher uses these credentials
+scripts/deploy_phase2.sh setup              # APIs, worker SA, buckets, dataset, topic, reference
+scripts/deploy_phase2.sh run-dataflow       # step 6: direct launch; blocks until the job ends
+scripts/deploy_phase2.sh parity             # step 7: expect BIGQUERY PARITY OK
+scripts/deploy_phase2.sh dead-letter        # the 5 rejects as JSON
+scripts/deploy_phase2.sh flex-build         # step 8: shaded jar, image, template spec
+scripts/deploy_phase2.sh flex-run           # launch from the template and wait
+scripts/deploy_phase2.sh parity             # parity for the flex run
+```
+
+| Design choice | Why |
+| --- | --- |
+| `NUMERIC` columns, written as strings | Exact decimals, as in COBOL; `FLOAT64` would add binary rounding |
+| `NULL` for no valid observations | The BigQuery form of the legacy `N/A`; `IS DISTINCT FROM` compares it safely |
+| `run_id` on every row, `WRITE_APPEND` | Reruns never overwrite or mix with earlier runs; parity checks one run |
+| Tables created by the deploy script, pipeline uses `CREATE_NEVER` | The schema lives in one place (`pipeline/bq/*.json`), not in code |
+| Reference report loaded unchanged, parsed in SQL by position | Fixed-width parsing in SQL, the same layout a copybook describes |
+| Every sink optional | The same jar runs locally with text output only |
+
+| Item | Status |
+| --- | --- |
+| `Rows` (BigQuery row and JSON mapping) unit tests | Pass (JUnit stand-in; `mvn test` runs them for real) |
+| `parity.sql` logic | Checked with a DuckDB translation: catches changed values, N/A vs 0, missing rows, duplicated errors; ignores other runs. BigQuery syntax is checked by the first real run |
+| Fixed-width offsets in `parity.sql` | Checked against all 20 reference lines |
+| `deploy_phase2.sh` | `bash -n` and ShellCheck clean; not yet run against GCP |
+| Beam sinks, Dataflow, Flex Template | Not yet compiled or run (no Maven access where written) |

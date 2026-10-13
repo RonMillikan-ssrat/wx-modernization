@@ -1,7 +1,12 @@
 package wx.pipeline;
 
+import com.google.api.services.bigquery.model.TableRow;
 import java.io.IOException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Map;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -11,6 +16,9 @@ import org.apache.beam.sdk.coders.VarLongCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.TextIO;
+import org.apache.beam.sdk.io.gcp.bigquery.BigQueryIO;
+import org.apache.beam.sdk.io.gcp.bigquery.TableRowJsonCoder;
+import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.Description;
@@ -34,6 +42,7 @@ import org.slf4j.LoggerFactory;
 import wx.core.DayAccumulator;
 import wx.core.DaySummary;
 import wx.core.ObsRecord;
+import wx.core.Rows;
 import wx.core.SplitKeyDetector;
 import wx.core.Validator;
 import wx.core.WxobsLayout;
@@ -48,6 +57,11 @@ import wx.core.WxobsLayout;
  *                                        ├─▶ rejected Validator.Reject ─▶ errors.txt (dead letter)
  *                                        └─▶ run starts KV(key, 1) ─▶ Sum.longsPerKey ─▶ split_keys.txt
  *                                               (keys the legacy control break would have split)
+ *
+ *   Optional cloud sinks (Phase 2, step 5), each enabled by its option:
+ *     DaySummary       ─▶ BigQuery  --bqSummaryTable   (partitioned by obs_date, tagged with run_id)
+ *     Validator.Reject ─▶ BigQuery  --bqErrorsTable
+ *     Validator.Reject ─▶ Pub/Sub   --deadLetterTopic  (one JSON message per rejected record)
  * </pre>
  *
  * <p>All business logic lives in {@code wx.core} and is unit-tested without Beam. This class only
@@ -77,6 +91,52 @@ public class WxSummaryPipeline {
     String getOutput();
 
     void setOutput(String value);
+
+    @Description("BigQuery summary table, PROJECT:DATASET.TABLE. Must exist (CREATE_NEVER). Optional.")
+    String getBqSummaryTable();
+
+    void setBqSummaryTable(String value);
+
+    @Description("BigQuery errors table, PROJECT:DATASET.TABLE. Must exist (CREATE_NEVER). Optional.")
+    String getBqErrorsTable();
+
+    void setBqErrorsTable(String value);
+
+    @Description("Pub/Sub dead-letter topic, projects/PROJECT/topics/TOPIC. Optional.")
+    String getDeadLetterTopic();
+
+    void setDeadLetterTopic(String value);
+
+    @Description("Run identifier written to every BigQuery row and dead-letter message. "
+        + "Defaults to run-<UTC timestamp>.")
+    String getRunId();
+
+    void setRunId(String value);
+  }
+
+  static String defaultRunId() {
+    return "run-" + DateTimeFormatter.ofPattern("yyyyMMdd't'HHmmss'z'")
+        .withZone(ZoneOffset.UTC).format(Instant.now());
+  }
+
+  /** Copies a row map into a TableRow. A null value is left out, which BigQuery loads as NULL. */
+  static TableRow toTableRow(Map<String, Object> values) {
+    TableRow row = new TableRow();
+    values.forEach((k, v) -> {
+      if (v != null) {
+        row.set(k, v);
+      }
+    });
+    return row;
+  }
+
+  /** BigQuery load job: append only, never create, so the table definition stays in one place. */
+  static BigQueryIO.Write<TableRow> appendTo(String table) {
+    return BigQueryIO.writeTableRows()
+        .to(table)
+        .withMethod(BigQueryIO.Write.Method.FILE_LOADS)
+        .withCreateDisposition(BigQueryIO.Write.CreateDisposition.CREATE_NEVER)
+        .withWriteDisposition(BigQueryIO.Write.WriteDisposition.WRITE_APPEND);
   }
 
   /**
@@ -185,6 +245,8 @@ public class WxSummaryPipeline {
   public static Pipeline build(Options options) {
     Pipeline p = Pipeline.create(options);
     String out = options.getOutput().replaceAll("/+$", "");
+    final String runId = options.getRunId() != null ? options.getRunId() : defaultRunId();
+    LOG.info("run_id={}", runId);
 
     PCollectionTuple routed = p
         .apply("MatchInput", FileIO.match().filepattern(options.getInput()))
@@ -223,6 +285,28 @@ public class WxSummaryPipeline {
         .apply("CountRunsPerKey", Sum.longsPerKey())
         .apply("WarnSplitKeys", ParDo.of(new SplitKeyWarnFn()))
         .apply("WriteSplitKeys", TextIO.write().to(out + "/split_keys").withSuffix(".txt").withoutSharding());
+
+    // Cloud sinks. Each is optional, so the same build runs locally with text output only.
+    if (options.getBqSummaryTable() != null) {
+      summaries
+          .apply("ToSummaryRow", MapElements.into(TypeDescriptor.of(TableRow.class))
+              .via((DaySummary s) -> toTableRow(Rows.summary(s, runId))))
+          .setCoder(TableRowJsonCoder.of())
+          .apply("WriteSummaryBigQuery", appendTo(options.getBqSummaryTable()));
+    }
+    if (options.getBqErrorsTable() != null) {
+      rejected
+          .apply("ToErrorRow", MapElements.into(TypeDescriptor.of(TableRow.class))
+              .via((Validator.Reject r) -> toTableRow(Rows.error(r, runId))))
+          .setCoder(TableRowJsonCoder.of())
+          .apply("WriteErrorsBigQuery", appendTo(options.getBqErrorsTable()));
+    }
+    if (options.getDeadLetterTopic() != null) {
+      rejected
+          .apply("ToDeadLetterJson", MapElements.into(TypeDescriptors.strings())
+              .via((Validator.Reject r) -> Rows.json(Rows.error(r, runId))))
+          .apply("PublishDeadLetter", PubsubIO.writeStrings().to(options.getDeadLetterTopic()));
+    }
 
     return p;
   }

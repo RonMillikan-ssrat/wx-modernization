@@ -1,0 +1,45 @@
+{
+  "name": "WXSUMM weather summary (Beam)",
+  "description": "Decodes fixed-length EBCDIC weather observations (copybook WXOBS), validates them with the legacy rules, and writes daily station summaries to BigQuery, rejects to BigQuery and Pub/Sub, and legacy-format text files to Cloud Storage.",
+  "parameters": [
+    {
+      "name": "input",
+      "label": "Input file pattern",
+      "helpText": "Cloud Storage path of the EBCDIC input, e.g. gs://bucket/obs/sample/obs.ebc",
+      "regexes": ["^gs://.+$"]
+    },
+    {
+      "name": "output",
+      "label": "Output directory",
+      "helpText": "Cloud Storage directory for summary.txt, errors.txt and split_keys.txt",
+      "regexes": ["^gs://.+$"]
+    },
+    {
+      "name": "bqSummaryTable",
+      "label": "BigQuery summary table",
+      "helpText": "PROJECT:DATASET.TABLE; the table must already exist",
+      "isOptional": true,
+      "regexes": ["^[^:]+:[^.]+[.].+$"]
+    },
+    {
+      "name": "bqErrorsTable",
+      "label": "BigQuery errors table",
+      "helpText": "PROJECT:DATASET.TABLE; the table must already exist",
+      "isOptional": true,
+      "regexes": ["^[^:]+:[^.]+[.].+$"]
+    },
+    {
+      "name": "deadLetterTopic",
+      "label": "Pub/Sub dead-letter topic",
+      "helpText": "projects/PROJECT/topics/TOPIC; one JSON message per rejected record",
+      "isOptional": true,
+      "regexes": ["^projects/[^/]+/topics/[^/]+$"]
+    },
+    {
+      "name": "runId",
+      "label": "Run ID",
+      "helpText": "Written to every BigQuery row; defaults to run-<UTC timestamp>",
+      "isOptional": true
+    }
+  ]
+}

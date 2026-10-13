@@ -1,0 +1,10 @@
+[
+  {"name": "run_id",       "type": "STRING", "mode": "REQUIRED", "description": "Pipeline run that wrote this row"},
+  {"name": "record",       "type": "INT64",  "mode": "REQUIRED", "description": "Zero-based input record position"},
+  {"name": "code",         "type": "STRING", "mode": "REQUIRED", "description": "R01-R05 legacy, R06 undecodable"},
+  {"name": "reason",       "type": "STRING", "mode": "REQUIRED"},
+  {"name": "station",      "type": "STRING", "mode": "NULLABLE"},
+  {"name": "obs_date_raw", "type": "STRING", "mode": "NULLABLE", "description": "As read; may be invalid"},
+  {"name": "hour",         "type": "STRING", "mode": "NULLABLE"},
+  {"name": "error_line",   "type": "STRING", "mode": "REQUIRED", "description": "Legacy ERROUT line layout"}
+]
