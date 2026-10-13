@@ -182,12 +182,21 @@ step_parity() {
         --format pretty "$(render_sql pipeline/bq/counts.sql)"
     log "SQL parity vs the WXSUMM reference, joined on station + obs_date"
     local diffs
-    diffs=$(bq --project_id "$PROJECT_ID" --location "$REGION" query --use_legacy_sql=false \
-        --format csv --max_rows 1000 "$(render_sql pipeline/bq/parity.sql)")
-    # CSV output: a header line, then one line per difference.
+    # bq prints query errors on stdout, so capture both streams and show them on failure
+    # instead of letting set -e stop the script with the message trapped in $diffs.
+    if ! diffs=$(bq --project_id "$PROJECT_ID" --location "$REGION" query --use_legacy_sql=false \
+            --format csv --max_rows 1000 "$(render_sql pipeline/bq/parity.sql)" 2>&1); then
+        printf '%s\n' "$diffs"
+        echo "parity query failed"
+        exit 2
+    fi
+    # CSV output: nothing when there are no differences, else a header plus one line each.
+    # grep -c exits 1 when it counts zero lines; '|| true' keeps set -e from treating the
+    # success case as a failure.
     local n
-    n=$(( $(printf '%s\n' "$diffs" | grep -c .) - 1 ))
-    if (( n <= 0 )); then
+    n=$(printf '%s\n' "$diffs" | grep -c '[^[:space:]]' || true)
+    n=$(( n > 0 ? n - 1 : 0 ))
+    if (( n == 0 )); then
         echo "BIGQUERY PARITY OK ($RUN_ID)"
     else
         printf '%s\n' "$diffs"
