@@ -7,7 +7,9 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.Map;
+import org.apache.beam.runners.dataflow.options.DataflowPipelineOptions;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.CoderRegistry;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
@@ -313,6 +315,14 @@ public class WxSummaryPipeline {
 
   public static void main(String[] args) {
     Options options = PipelineOptionsFactory.fromArgs(args).withValidation().as(Options.class);
-    build(options).run().waitUntilFinish();
+    PipelineResult result = build(options).run();
+    // A Flex Template launcher runs main() with --templateLocation set. run() then only writes the
+    // job specification, and the Dataflow service starts the job after main() returns; the result
+    // throws if waited on. Wait only for a direct launch (DirectRunner, or DataflowRunner from Maven).
+    if (options.as(DataflowPipelineOptions.class).getTemplateLocation() == null) {
+      result.waitUntilFinish();
+    } else {
+      LOG.info("template launch: job specification written, not waiting for the job");
+    }
   }
 }

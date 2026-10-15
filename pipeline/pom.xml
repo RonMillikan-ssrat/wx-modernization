@@ -44,7 +44,7 @@
     <dependency>
       <groupId>org.apache.beam</groupId>
       <artifactId>beam-runners-google-cloud-dataflow-java</artifactId>
-      <scope>runtime</scope>
+      <!-- compile scope: main() reads DataflowPipelineOptions.templateLocation -->
     </dependency>
     <dependency>
       <groupId>org.apache.beam</groupId>
