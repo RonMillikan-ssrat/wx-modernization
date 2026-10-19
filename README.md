@@ -212,5 +212,62 @@ scripts/deploy_phase2.sh parity             # parity for the flex run
 | `Rows` (BigQuery row and JSON mapping) unit tests | Pass (JUnit stand-in; `mvn test` runs them for real) |
 | `parity.sql` logic | Checked with a DuckDB translation: catches changed values, N/A vs 0, missing rows, duplicated errors; ignores other runs. BigQuery syntax is checked by the first real run |
 | Fixed-width offsets in `parity.sql` | Checked against all 20 reference lines |
-| `deploy_phase2.sh` | `bash -n` and ShellCheck clean; not yet run against GCP |
-| Beam sinks, Dataflow, Flex Template | Not yet compiled or run (no Maven access where written) |
+| `deploy_phase2.sh` | Run against GCP: `setup`, `run-dataflow`, `parity`, `flex-build`, `flex-run` |
+| Beam sinks, Dataflow, Flex Template | Run on GCP: direct launch and Flex Template both give BIGQUERY PARITY OK (20 summary rows, 5 errors) |
+
+# Phase 3: real weather data (HRRR GRIB2 -> station point series)
+
+The legacy job read station observations someone else had already decoded. Phase 3 goes one step
+upstream: it reads NOAA's HRRR model output (GRIB2, 3 km Lambert conformal grid, 1799 x 1059) and
+samples it at stations, producing the kind of hourly point series a downstream summary would use.
+
+```
+NOAA HRRR (public, GCS)  --hrrr_fetch.py: .idx inventory + HTTP byte ranges, 5 fields/hour-->
+  work/hrrr/DATE/*.subset.grib2 --upload--> gs://...-landing/hrrr/DATE/
+                                                 |
+          HrrrPointPipeline (Beam, Java)  <------+------>  hrrr_reference.py (eccodes, Python)
+          Grib2Scanner: sections 1/3/4/5 by octet           eccodes: unpack + every point's lat/lon
+          LambertConformal: Snyder, sphere R=6371229 m      numpy great-circle nearest point
+          netCDF-Java: unpack DRS 5.3 complex packing                     |
+          rotate grid-relative winds to earth-relative                    |
+                     |                                                     |
+          BigQuery wx.hrrr_points  ----- hrrr_parity.sql -----  BigQuery wx.hrrr_reference
+                         cell (i,j) exact; value within packing_step/2
+```
+
+Fields: 2 m temperature and dewpoint, 10 m U/V wind, surface pressure. Stations: KIAH, KHOU, KSGR,
+KDEN (override with `--stations=ID:lat:lon,...`).
+
+```bash
+export PROJECT_ID=wx-modernization-0 REGION=us-central1 DATE=20261014   # any recent day
+scripts/deploy_phase3.sh python      # venv with eccodes + numpy
+scripts/deploy_phase3.sh check       # HTTP 200 = the HRRR bucket and layout are as expected
+scripts/deploy_phase3.sh list        # the 5 .idx lines that would be fetched for hour 0
+HOURS=0 scripts/deploy_phase3.sh fetch
+scripts/deploy_phase3.sh run-local   # reference + DirectRunner + local parity; no GCP
+HOURS=0-23 scripts/deploy_phase3.sh fetch
+scripts/deploy_phase3.sh run-local
+scripts/deploy_phase3.sh setup       # upload, bq tables, load reference
+scripts/deploy_phase3.sh run-dataflow
+scripts/deploy_phase3.sh parity      # expect BIGQUERY HRRR PARITY OK
+```
+
+| Design choice | Why |
+| --- | --- |
+| Metadata and geometry parsed by hand (`wx.grib`), unpacking by netCDF-Java | The octets and the projection are the part worth understanding; complex packing with spatial differencing is the part not worth re-implementing |
+| A second, independent decoder (eccodes) as the oracle | Plays the role WXSUMM played in Phases 1-2: two code bases, same input, compare outputs |
+| Tolerance = half a packing step, read from each message | Both decoders read the same packed integers, so they can differ only by float rounding; the file says how fine that is (2^E / 10^D), nothing hand-picked |
+| Grid cell compared exactly, before values | A wrong projection usually lands one cell over and still gives plausible numbers; comparing values alone would hide it |
+| Raw grid-relative U/V stored, earth-relative wind derived | Parity runs on what the file holds; the rotation (about 1 deg at Houston, 4 deg at Denver) is a separate, tested step |
+| Byte-range fetch from the `.idx` inventory, strict matching | About 5-10 MB per hour instead of the full file; any unexpected inventory line fails loudly instead of fetching the wrong field |
+| DATETIME written as `YYYY-MM-DD HH:MM:SS` on both sides | BigQuery's canonical form, and the two sides join on identical strings |
+
+| Item | Status |
+| --- | --- |
+| `Grib2Scanner`, `LambertConformal`, `StationPoints` (21 tests) | Pass under the JUnit stand-in against eccodes-made fixtures: section metadata identical (including negative E), nearest cell agrees at 400+ points across the HRRR grid, inverse coordinates within 1e-6 deg |
+| Mutation checks | Wrong earth radius, reversed wind-rotation sign, and two's complement instead of sign-magnitude are each caught |
+| `hrrr_fetch.py` | Reproduced a fixture byte for byte from a file with interleaved decoy messages; **real HRRR bucket name and `.idx` text not yet checked** (`check`, `list`) |
+| `hrrr_reference.py` | Matches eccodes' own `find_nearest` in 15/15 checks |
+| `hrrr_points_parity.py` | Passes on matching input; reports a 2-step value change and a one-cell shift |
+| `NetcdfUnpacker` + its tests, `HrrrPointPipeline` | **Not yet compiled or run** (no Maven or Unidata access where written); `mvn test` is the first run |
+| `hrrr_parity.sql`, `hrrr_counts.sql`, `deploy_phase3.sh` cloud steps | ShellCheck clean; **not yet run against GCP** |
